@@ -21,7 +21,7 @@ exchange = ccxt.bitget({
 
 SYMBOL = 'BTC/USDT:USDT'
 LEVERAGE = 5
-TARGET_MARGIN_PCT = 0.33
+TARGET_MARGIN_PCT = 0.10
 MIN_AMOUNT_BTC = 0.001
 
 def setup_exchange():
