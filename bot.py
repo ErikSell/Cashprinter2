@@ -140,109 +140,107 @@ def health():
 
 from datetime import datetime
 
-"""
+
 
 @app.route('/backtest', methods=['GET'])
 def backtest():
-    try:
-        # Parameter aus URL (z. B. ?days=30)
-        days = int(request.args.get('days', 30))  # Standard: 30 Tage zurück
+   try:
+        # Fix: Nur letzte 10 Stunden (600 Minuten = 600 Kerzen)
+        hours = 10
         timeframe = '1m'
+        since = exchange.milliseconds() - hours * 60 * 60 * 1000  # 10 Stunden zurück
+        limit = 600 + 50  # 600 Kerzen + kleiner Puffer
 
-        # Startzeit berechnen
-        since = exchange.milliseconds() - days * 24 * 60 * 60 * 1000
+        logger.info(f"Backtest: Letzte {hours} Stunden, seit {since}, limit {limit}")
 
-        logger.info(f"Backtest startet: {days} Tage zurück, seit {since}")
+        # Ein einziger API-Call – keine Schleife, kein Spam
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, since=since, limit=limit)
 
-        # Historische 1m OHLCV laden (Bitget erlaubt ~1000–2000 Kerzen pro Call)
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, since=since, limit=1000)
+        if not ohlcv or len(ohlcv) == 0:
+            logger.warning("Keine Daten geladen")
+            return jsonify({"error": "Keine Daten von Bitget"}), 500
 
-        # Wenn mehr Daten nötig → paginieren (mehrere Calls)
-        while len(ohlcv) < days * 1440:  # 1440 Minuten pro Tag
-            last_ts = ohlcv[-1][0]
-            more = exchange.fetch_ohlcv(SYMBOL, timeframe, since=last_ts, limit=1000)
-            if not more or more[0][0] <= last_ts:
-                break
-            ohlcv += more[1:]  # ersten überspringen (Duplikat)
-
-        logger.info(f"{len(ohlcv)} Kerzen geladen")
+        logger.info(f"{len(ohlcv)} Kerzen geladen (ca. {len(ohlcv)/60:.1f} Stunden)")
 
         # Simulation-Variablen
         trades = []
-        position = None  # 'long', 'short' oder None
-        entry_price = 0
-        entry_time = 0
-        total_pnl = 0
-        equity_curve = [100]  # Start mit 100 Einheiten
+        position = None  # 'long' oder 'short' oder None
+        entry_price = 0.0
+        total_pnl = 0.0
+        equity_curve = [100.0]  # Startkapital 100 Einheiten
 
         for candle in ohlcv:
-            timestamp, open_price, high, low, close, volume = candle
+            timestamp, open_p, high, low, close, volume = candle
             dt = datetime.fromtimestamp(timestamp / 1000)
 
-            # Simuliere Signal (hier deine Logik – anpassen!)
-            # Das ist der wichtigste Teil – wir brauchen deine echte Signal-Logik
-            # Für Test nehmen wir einfache Dummy-Regeln – später ersetzen
+            # Dummy-Signal – später ersetzen wir das durch deine echte AI/Mild-Logik
             signal = None
-            if close > open_price * 1.001:  # Dummy: Bullish bei +0.1%
+            if close > open_p * 1.001:   # +0.1% → Bullish
                 signal = "AI Bullish Reversal"
-            elif close < open_price * 0.999:  # Dummy: Bearish bei -0.1%
+            elif close < open_p * 0.999: # -0.1% → Bearish
                 signal = "AI Bearish Reversal"
 
             if signal:
-                logger.info(f"{dt} – Signal: {signal} – Preis: {close}")
+                logger.info(f"{dt.strftime('%H:%M')} – Signal: {signal} – Close: {close}")
 
-                side, _ = get_position()  # Aktuelle simulierte Position
+                # Simulierte Trade-Logik (angepasst an deine Regeln)
                 if "Bullish" in signal:
-                    if side == 'short':
+                    if position == 'short':
                         # Close Short
-                        pnl = (entry_price - close) * current_size  # Gewinn/Verlust
+                        pnl = (entry_price - close) * 1  # Dummy-Größe 1 BTC für PnL
                         total_pnl += pnl
-                        trades.append({"time": dt, "action": "close_short", "price": close, "pnl": pnl})
-                    if side != 'long':
+                        trades.append({"time": str(dt), "action": "close_short", "price": close, "pnl": round(pnl, 2)})
+                        position = None
+                    if position != 'long':
                         # Open Long
                         position = 'long'
                         entry_price = close
-                        entry_time = dt
-                        trades.append({"time": dt, "action": "open_long", "price": close})
+                        trades.append({"time": str(dt), "action": "open_long", "price": close})
 
                 elif "Bearish" in signal:
-                    if side == 'long':
-                        pnl = (close - entry_price) * current_size
+                    if position == 'long':
+                        # Close Long
+                        pnl = (close - entry_price) * 1
                         total_pnl += pnl
-                        trades.append({"time": dt, "action": "close_long", "price": close, "pnl": pnl})
-                    if side != 'short':
+                        trades.append({"time": str(dt), "action": "close_long", "price": close, "pnl": round(pnl, 2)})
+                        position = None
+                    if position != 'short':
+                        # Open Short
                         position = 'short'
                         entry_price = close
-                        entry_time = dt
-                        trades.append({"time": dt, "action": "open_short", "price": close})
+                        trades.append({"time": str(dt), "action": "open_short", "price": close})
 
-            # Equity Curve aktualisieren (vereinfacht)
+            # Equity-Kurve (vereinfacht, ohne Leverage)
             if position == 'long':
-                current_equity = equity_curve[-1] * (close / entry_price)
+                eq = equity_curve[-1] * (close / entry_price if entry_price else 1)
             elif position == 'short':
-                current_equity = equity_curve[-1] * (entry_price / close)
+                eq = equity_curve[-1] * (entry_price / close if entry_price else 1)
             else:
-                current_equity = equity_curve[-1]
-            equity_curve.append(current_equity)
+                eq = equity_curve[-1]
+            equity_curve.append(eq)
 
-        # Ergebnisse zusammenfassen
+        # Ergebnis
         result = {
+            "hours": hours,
+            "candles_loaded": len(ohlcv),
             "trades_count": len(trades),
-            "total_pnl": total_pnl,
-            "win_rate": len([t for t in trades if t.get('pnl', 0) > 0]) / len(trades) if trades else 0,
-            "max_drawdown": min(equity_curve) / max(equity_curve) if equity_curve else 0,
-            "final_equity": equity_curve[-1],
-            "trades": trades[-10:]  # letzte 10 Trades
+            "total_pnl": round(total_pnl, 2),
+            "final_equity": round(equity_curve[-1], 2),
+            "max_drawdown_pct": round((min(equity_curve) / max(equity_curve) - 1) * 100, 2) if equity_curve else 0,
+            "sample_trades": trades[-10:]  # letzte 10 Trades
         }
+
+        logger.info(f"Backtest abgeschlossen: {result}")
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Backtest Fehler: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
         logger.info(f"Backtest fertig: {result}")
         return jsonify(result), 200
 
-    except Exception as e:
-        logger.error(f"Backtest Fehler: {e}")
-        return jsonify({"error": str(e)}), 500
-"""
-        
+  
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
