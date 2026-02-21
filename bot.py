@@ -140,6 +140,8 @@ def health():
 
 from datetime import datetime
 
+"""
+
 @app.route('/backtest', methods=['GET'])
 def backtest():
     try:
@@ -239,6 +241,8 @@ def backtest():
     except Exception as e:
         logger.error(f"Backtest Fehler: {e}")
         return jsonify({"error": str(e)}), 500
+"""
+        
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
