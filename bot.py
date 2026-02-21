@@ -141,76 +141,66 @@ def health():
 from datetime import datetime
 
 
-
 @app.route('/backtest', methods=['GET'])
 def backtest():
-   try:
+    try:
         # Fix: Nur letzte 10 Stunden (600 Minuten = 600 Kerzen)
         hours = 10
         timeframe = '1m'
-        since = exchange.milliseconds() - hours * 60 * 60 * 1000  # 10 Stunden zurück
-        limit = 600 + 50  # 600 Kerzen + kleiner Puffer
+        since = exchange.milliseconds() - hours * 60 * 60 * 1000
+        limit = 600 + 50
 
         logger.info(f"Backtest: Letzte {hours} Stunden, seit {since}, limit {limit}")
 
-        # Ein einziger API-Call – keine Schleife, kein Spam
         ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, since=since, limit=limit)
 
         if not ohlcv or len(ohlcv) == 0:
             logger.warning("Keine Daten geladen")
-            return jsonify({"error": "Keine Daten von Bitget"}), 500
+            return jsonify({"error": "Keine Daten"}), 500
 
-        logger.info(f"{len(ohlcv)} Kerzen geladen (ca. {len(ohlcv)/60:.1f} Stunden)")
+        logger.info(f"{len(ohlcv)} Kerzen geladen")
 
-        # Simulation-Variablen
         trades = []
-        position = None  # 'long' oder 'short' oder None
+        position = None
         entry_price = 0.0
         total_pnl = 0.0
-        equity_curve = [100.0]  # Startkapital 100 Einheiten
+        equity_curve = [100.0]
 
         for candle in ohlcv:
             timestamp, open_p, high, low, close, volume = candle
             dt = datetime.fromtimestamp(timestamp / 1000)
 
-            # Dummy-Signal – später ersetzen wir das durch deine echte AI/Mild-Logik
             signal = None
-            if close > open_p * 1.001:   # +0.1% → Bullish
+            if close > open_p * 1.001:
                 signal = "AI Bullish Reversal"
-            elif close < open_p * 0.999: # -0.1% → Bearish
+            elif close < open_p * 0.999:
                 signal = "AI Bearish Reversal"
 
             if signal:
                 logger.info(f"{dt.strftime('%H:%M')} – Signal: {signal} – Close: {close}")
 
-                # Simulierte Trade-Logik (angepasst an deine Regeln)
                 if "Bullish" in signal:
                     if position == 'short':
-                        # Close Short
-                        pnl = (entry_price - close) * 1  # Dummy-Größe 1 BTC für PnL
+                        pnl = (entry_price - close) * 1
                         total_pnl += pnl
                         trades.append({"time": str(dt), "action": "close_short", "price": close, "pnl": round(pnl, 2)})
                         position = None
                     if position != 'long':
-                        # Open Long
                         position = 'long'
                         entry_price = close
                         trades.append({"time": str(dt), "action": "open_long", "price": close})
 
                 elif "Bearish" in signal:
                     if position == 'long':
-                        # Close Long
                         pnl = (close - entry_price) * 1
                         total_pnl += pnl
                         trades.append({"time": str(dt), "action": "close_long", "price": close, "pnl": round(pnl, 2)})
                         position = None
                     if position != 'short':
-                        # Open Short
                         position = 'short'
                         entry_price = close
                         trades.append({"time": str(dt), "action": "open_short", "price": close})
 
-            # Equity-Kurve (vereinfacht, ohne Leverage)
             if position == 'long':
                 eq = equity_curve[-1] * (close / entry_price if entry_price else 1)
             elif position == 'short':
@@ -219,15 +209,14 @@ def backtest():
                 eq = equity_curve[-1]
             equity_curve.append(eq)
 
-        # Ergebnis
         result = {
             "hours": hours,
-            "candles_loaded": len(ohlcv),
-            "trades_count": len(trades),
+            "candles": len(ohlcv),
+            "trades": len(trades),
             "total_pnl": round(total_pnl, 2),
             "final_equity": round(equity_curve[-1], 2),
             "max_drawdown_pct": round((min(equity_curve) / max(equity_curve) - 1) * 100, 2) if equity_curve else 0,
-            "sample_trades": trades[-10:]  # letzte 10 Trades
+            "sample_trades": trades[-5:]
         }
 
         logger.info(f"Backtest abgeschlossen: {result}")
@@ -237,8 +226,6 @@ def backtest():
         logger.error(f"Backtest Fehler: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-        logger.info(f"Backtest fertig: {result}")
-        return jsonify(result), 200
 
   
 
