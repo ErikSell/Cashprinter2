@@ -3,6 +3,8 @@ import os
 import logging
 from flask import Flask, request, jsonify
 import ccxt
+import time
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
