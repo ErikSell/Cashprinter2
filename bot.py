@@ -1,3 +1,4 @@
+# bot.py – Feste Margin 5 USDT, Leverage 5x pro Order, Isolated pro Order
 import os
 import logging
 from flask import Flask, request, jsonify
@@ -20,20 +21,22 @@ exchange = ccxt.bitget({
 })
 
 SYMBOL = 'BTC/USDT:USDT'
+FIXED_MARGIN_USDT = 5.0          # <-- Hier änderst du später einfach die Zahl (z. B. 20)
 LEVERAGE = 5
-TARGET_MARGIN_PCT = 0.10
-MIN_AMOUNT_BTC = 0.001
 
-def setup_exchange():
+def setup_and_force_settings():
     try:
+        # Leverage pro Symbol erzwingen
         exchange.set_leverage(LEVERAGE, SYMBOL)
-        logger.info(f"Leverage {LEVERAGE}x gesetzt")
-        exchange.set_margin_mode('isolated', SYMBOL)
-        logger.info("Isolated Margin gesetzt")
-    except Exception as e:
-        logger.error(f"Setup Fehler: {e}")
+        logger.info(f"Leverage fix auf {LEVERAGE}x gesetzt")
 
-setup_exchange()
+        # Isolated Margin erzwingen
+        exchange.set_margin_mode('isolated', SYMBOL)
+        logger.info("Margin Mode fix auf isolated gesetzt")
+    except Exception as e:
+        logger.error(f"Settings erzwingen Fehler: {e}")
+
+setup_and_force_settings()
 
 def get_usdt_balance():
     try:
@@ -44,16 +47,18 @@ def get_usdt_balance():
         return 0
 
 def calculate_size():
-    usdt = get_usdt_balance()
-    if usdt <= 0:
+    usdt_free = get_usdt_balance()
+    if usdt_free < FIXED_MARGIN_USDT:
+        logger.warning(f"Nur {usdt_free:.2f} USDT frei < {FIXED_MARGIN_USDT} → Abbruch")
         return 0.0
-    target = usdt * TARGET_MARGIN_PCT
+
     try:
         price = float(exchange.fetch_ticker(SYMBOL)['last'])
-        size = target / price
-        size = max(MIN_AMOUNT_BTC, round(size, 3))
-        logger.info(f"Größe: {size:.3f} BTC (~{size*price:,.0f} USDT)")
-        return size
+        size_btc = FIXED_MARGIN_USDT / price
+        # Kein min 0.001 mehr – Bitget erlaubt sehr kleine Orders
+        size_btc = round(size_btc, 4)  # 4 Dezimalen für Sicherheit
+        logger.info(f"Feste Margin {FIXED_MARGIN_USDT} USDT → Größe: {size_btc:.4f} BTC (~{size_btc*price:.2f} USDT)")
+        return size_btc
     except Exception as e:
         logger.error(f"Größe-Fehler: {e}")
         return 0.0
@@ -79,7 +84,6 @@ def webhook():
         side, current_size = get_position()
         new_size = calculate_size()
         if new_size <= 0:
-            logger.warning("Keine Größe → Abbruch")
             return jsonify({"status": "no_size"}), 200
 
         signal_clean = signal.strip().lower()
