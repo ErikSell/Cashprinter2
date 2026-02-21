@@ -62,7 +62,7 @@ def calculate_size():
         # Genau die gewünschte Margin nutzen → Größe = Margin × Leverage / Preis
         notional_usdt = FIXED_MARGIN_USDT * LEVERAGE
         size_btc = notional_usdt / price
-        size_btc = round(size_btc, 4)  # 4 Dezimalen – Bitget erlaubt sehr klein
+        size_btc = round(size_btc, 6)  # 4 Dezimalen – Bitget erlaubt sehr klein
         logger.info(f"Feste Margin {FIXED_MARGIN_USDT} USDT → {LEVERAGE}x → Notional {notional_usdt:.2f} USDT → Größe {size_btc:.4f} BTC")
         return size_btc
     except Exception as e:
