@@ -140,48 +140,58 @@ def health():
 
 from datetime import datetime
 
-
 @app.route('/backtest', methods=['GET'])
 def backtest():
     try:
-        # Fix: Nur letzte 10 Stunden (600 Minuten = 600 Kerzen)
-        hours = 10
-        timeframe = '1m'
-        since = exchange.milliseconds() - hours * 60 * 60 * 1000
-        limit = 600 + 50
+        # Neue Settings: 4h-Chart, 300 Tage
+        timeframe = '4h'  # 4-Stunden-Kerzen
+        days = 300
+        since = exchange.milliseconds() - days * 24 * 60 * 60 * 1000
+        limit_per_call = 1000  # Bitget-Max pro Call
 
-        logger.info(f"Backtest: Letzte {hours} Stunden, seit {since}, limit {limit}")
+        logger.info(f"Backtest: {days} Tage, 4h-Chart, seit {since}")
 
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, since=since, limit=limit)
+        ohlcv = []
+        current_since = since
 
-        if not ohlcv or len(ohlcv) == 0:
-            logger.warning("Keine Daten geladen")
+        while True:
+            batch = exchange.fetch_ohlcv(SYMBOL, timeframe, since=current_since, limit=limit_per_call)
+            if not batch:
+                break
+            ohlcv += batch
+            current_since = batch[-1][0] + 1  # Nächste Kerze
+            logger.info(f"Geladen: {len(batch)} Kerzen, total {len(ohlcv)}")
+            time.sleep(0.5)  # Pause gegen Rate-Limit
+
+        if not ohlcv:
             return jsonify({"error": "Keine Daten"}), 500
 
-        logger.info(f"{len(ohlcv)} Kerzen geladen")
+        logger.info(f"{len(ohlcv)} Kerzen geladen (ca. {len(ohlcv)*4/24/30:.1f} Monate)")
 
+        # Simulation-Variablen
         trades = []
         position = None
         entry_price = 0.0
         total_pnl = 0.0
-        equity_curve = [100.0]
+        equity_curve = [100.0]  # Start mit 100 Einheiten
 
         for candle in ohlcv:
             timestamp, open_p, high, low, close, volume = candle
             dt = datetime.fromtimestamp(timestamp / 1000)
 
+            # Dummy-Signal – später echte Logik
             signal = None
-            if close > open_p * 1.001:
+            if close > open_p * 1.005:   # +0.5% → Bullish (anpassen!)
                 signal = "AI Bullish Reversal"
-            elif close < open_p * 0.999:
+            elif close < open_p * 0.995: # -0.5% → Bearish
                 signal = "AI Bearish Reversal"
 
             if signal:
-                logger.info(f"{dt.strftime('%H:%M')} – Signal: {signal} – Close: {close}")
+                logger.info(f"{dt.strftime('%Y-%m-%d %H:%M')} – Signal: {signal} – Close: {close}")
 
                 if "Bullish" in signal:
                     if position == 'short':
-                        pnl = (entry_price - close) * 1
+                        pnl = (entry_price - close) * 1  # Dummy-Größe 1 BTC
                         total_pnl += pnl
                         trades.append({"time": str(dt), "action": "close_short", "price": close, "pnl": round(pnl, 2)})
                         position = None
@@ -201,6 +211,7 @@ def backtest():
                         entry_price = close
                         trades.append({"time": str(dt), "action": "open_short", "price": close})
 
+            # Equity aktualisieren
             if position == 'long':
                 eq = equity_curve[-1] * (close / entry_price if entry_price else 1)
             elif position == 'short':
@@ -210,21 +221,24 @@ def backtest():
             equity_curve.append(eq)
 
         result = {
-            "hours": hours,
+            "timeframe": timeframe,
+            "days": days,
             "candles": len(ohlcv),
             "trades": len(trades),
             "total_pnl": round(total_pnl, 2),
             "final_equity": round(equity_curve[-1], 2),
             "max_drawdown_pct": round((min(equity_curve) / max(equity_curve) - 1) * 100, 2) if equity_curve else 0,
-            "sample_trades": trades[-5:]
+            "sample_trades": trades[-10:]
         }
 
-        logger.info(f"Backtest abgeschlossen: {result}")
+        logger.info(f"Backtest fertig: {result}")
         return jsonify(result), 200
 
     except Exception as e:
         logger.error(f"Backtest Fehler: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+
 
 
   
