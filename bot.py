@@ -1,10 +1,8 @@
-# bot.py – Feste Margin 5 USDT, Leverage 5x pro Order, Isolated pro Order
 import os
 import logging
 from flask import Flask, request, jsonify
 import ccxt
-import time
-from datetime import datetime
+import math  # Neu: Für floor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,20 +21,24 @@ exchange = ccxt.bitget({
 })
 
 SYMBOL = 'BTC/USDT:USDT'
-FIXED_MARGIN_USDT = 5.0          # <-- Hier änderst du später einfach die Zahl (z. B. 20)
+FIXED_MARGIN_USDT = 5.0
 LEVERAGE = 5
+
+# Neu: Markets laden für Precision
+exchange.load_markets()
+market = exchange.market(SYMBOL)
+min_size = market['limits']['amount']['min']  # 0.0001 BTC
+step_size = market['precision']['amount']     # 0.0001
+min_value_usdt = market['limits']['cost']['min']  # 5 USDT
 
 def setup_and_force_settings():
     try:
-        # Leverage pro Symbol erzwingen
         exchange.set_leverage(LEVERAGE, SYMBOL)
-        logger.info(f"Leverage fix auf {LEVERAGE}x gesetzt")
-
-        # Isolated Margin erzwingen
+        logger.info(f"Leverage auf {LEVERAGE}x gesetzt")
         exchange.set_margin_mode('isolated', SYMBOL)
-        logger.info("Margin Mode fix auf isolated gesetzt")
+        logger.info("Margin Mode auf isolated gesetzt")
     except Exception as e:
-        logger.error(f"Settings erzwingen Fehler: {e}")
+        logger.error(f"Settings-Fehler: {e}")
 
 setup_and_force_settings()
 
@@ -45,7 +47,7 @@ def get_usdt_balance():
         bal = exchange.fetch_balance(params={'type': 'swap'})
         return float(bal.get('USDT', {}).get('free', 0))
     except Exception as e:
-        logger.error(f"Balance Fehler: {e}")
+        logger.error(f"Balance-Fehler: {e}")
         return 0
 
 def calculate_size():
@@ -55,17 +57,20 @@ def calculate_size():
         return 0.0
 
     try:
-        # Leverage und Isolated vor jeder Berechnung erzwingen
-        exchange.set_leverage(LEVERAGE, SYMBOL)
-        exchange.set_margin_mode('isolated', SYMBOL)
-        logger.info(f"Erzwungen: {LEVERAGE}x Leverage + Isolated für {SYMBOL}")
-
         price = float(exchange.fetch_ticker(SYMBOL)['last'])
-        # Genau die gewünschte Margin nutzen → Größe = Margin × Leverage / Preis
         notional_usdt = FIXED_MARGIN_USDT * LEVERAGE
+        if notional_usdt < min_value_usdt:
+            logger.warning(f"Notional {notional_usdt:.2f} < Min-Value {min_value_usdt} USDT → Zu klein")
+            return 0.0
+
         size_btc = notional_usdt / price
-        size_btc = round(size_btc, 5)  # 4 Dezimalen – Bitget erlaubt sehr klein
-        logger.info(f"Feste Margin {FIXED_MARGIN_USDT} USDT → {LEVERAGE}x → Notional {notional_usdt:.2f} USDT → Größe {size_btc:.4f} BTC")
+        # Neu: Runde auf nächstes niedrigeres Vielfaches der Step Size
+        size_btc = math.floor(size_btc / step_size) * step_size
+        if size_btc < min_size:
+            logger.warning(f"Gerundete Size {size_btc:.6f} < Min-Size {min_size} BTC → Zu klein")
+            return 0.0
+
+        logger.info(f"Feste Margin {FIXED_MARGIN_USDT} USDT → {LEVERAGE}x → Notional {notional_usdt:.2f} USDT → Gerundete Size {size_btc:.6f} BTC")
         return size_btc
     except Exception as e:
         logger.error(f"Größe-Fehler: {e}")
@@ -94,37 +99,41 @@ def webhook():
         if new_size <= 0:
             return jsonify({"status": "no_size"}), 200
 
+        # Neu: Size als String für Bitget-Precision
+        new_size_str = str(new_size)
+        current_size_str = str(current_size) if current_size > 0 else '0'
+
         signal_clean = signal.strip().lower()
 
         if "ai bullish reversal" in signal_clean:
             logger.info("AI Bullish Reversal → Long / Reversal")
             if side == 'short':
                 logger.info("Short schließen")
-                exchange.create_market_buy_order(SYMBOL, current_size, params={'reduceOnly': True})
+                exchange.create_market_buy_order(SYMBOL, current_size_str, params={'reduceOnly': True})
             if side != 'long':
                 logger.info("Long öffnen")
-                exchange.create_market_buy_order(SYMBOL, new_size)
+                exchange.create_market_buy_order(SYMBOL, new_size_str)
 
         elif "ai bearish reversal" in signal_clean:
             logger.info("AI Bearish Reversal → Short / Reversal")
             if side == 'long':
                 logger.info("Long schließen")
-                exchange.create_market_sell_order(SYMBOL, current_size, params={'reduceOnly': True})
+                exchange.create_market_sell_order(SYMBOL, current_size_str, params={'reduceOnly': True})
             if side != 'short':
                 logger.info("Short öffnen")
-                exchange.create_market_sell_order(SYMBOL, new_size)
+                exchange.create_market_sell_order(SYMBOL, new_size_str)
 
         elif "mild bullish reversal" in signal_clean:
             logger.info("Mild Bullish → nur Short close")
             if side == 'short':
                 logger.info("Short schließen")
-                exchange.create_market_buy_order(SYMBOL, current_size, params={'reduceOnly': True})
+                exchange.create_market_buy_order(SYMBOL, current_size_str, params={'reduceOnly': True})
 
         elif "mild bearish reversal" in signal_clean:
             logger.info("Mild Bearish → nur Long close")
             if side == 'long':
                 logger.info("Long schließen")
-                exchange.create_market_sell_order(SYMBOL, current_size, params={'reduceOnly': True})
+                exchange.create_market_sell_order(SYMBOL, current_size_str, params={'reduceOnly': True})
 
         else:
             logger.warning(f"Unbekanntes Signal: '{signal}'")
@@ -139,111 +148,6 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health():
     return "OK", 200
-
-from datetime import datetime
-
-@app.route('/backtest', methods=['GET'])
-def backtest():
-    try:
-        # Neue Settings: 4h-Chart, 300 Tage
-        timeframe = '4h'  # 4-Stunden-Kerzen
-        days = 300
-        since = exchange.milliseconds() - days * 24 * 60 * 60 * 1000
-        limit_per_call = 1000  # Bitget-Max pro Call
-
-        logger.info(f"Backtest: {days} Tage, 4h-Chart, seit {since}")
-
-        ohlcv = []
-        current_since = since
-
-        while True:
-            batch = exchange.fetch_ohlcv(SYMBOL, timeframe, since=current_since, limit=limit_per_call)
-            if not batch:
-                break
-            ohlcv += batch
-            current_since = batch[-1][0] + 1  # Nächste Kerze
-            logger.info(f"Geladen: {len(batch)} Kerzen, total {len(ohlcv)}")
-            time.sleep(0.5)  # Pause gegen Rate-Limit
-
-        if not ohlcv:
-            return jsonify({"error": "Keine Daten"}), 500
-
-        logger.info(f"{len(ohlcv)} Kerzen geladen (ca. {len(ohlcv)*4/24/30:.1f} Monate)")
-
-        # Simulation-Variablen
-        trades = []
-        position = None
-        entry_price = 0.0
-        total_pnl = 0.0
-        equity_curve = [100.0]  # Start mit 100 Einheiten
-
-        for candle in ohlcv:
-            timestamp, open_p, high, low, close, volume = candle
-            dt = datetime.fromtimestamp(timestamp / 1000)
-
-            # Dummy-Signal – später echte Logik
-            signal = None
-            if close > open_p * 1.005:   # +0.5% → Bullish (anpassen!)
-                signal = "AI Bullish Reversal"
-            elif close < open_p * 0.995: # -0.5% → Bearish
-                signal = "AI Bearish Reversal"
-
-            if signal:
-                logger.info(f"{dt.strftime('%Y-%m-%d %H:%M')} – Signal: {signal} – Close: {close}")
-
-                if "Bullish" in signal:
-                    if position == 'short':
-                        pnl = (entry_price - close) * 1  # Dummy-Größe 1 BTC
-                        total_pnl += pnl
-                        trades.append({"time": str(dt), "action": "close_short", "price": close, "pnl": round(pnl, 2)})
-                        position = None
-                    if position != 'long':
-                        position = 'long'
-                        entry_price = close
-                        trades.append({"time": str(dt), "action": "open_long", "price": close})
-
-                elif "Bearish" in signal:
-                    if position == 'long':
-                        pnl = (close - entry_price) * 1
-                        total_pnl += pnl
-                        trades.append({"time": str(dt), "action": "close_long", "price": close, "pnl": round(pnl, 2)})
-                        position = None
-                    if position != 'short':
-                        position = 'short'
-                        entry_price = close
-                        trades.append({"time": str(dt), "action": "open_short", "price": close})
-
-            # Equity aktualisieren
-            if position == 'long':
-                eq = equity_curve[-1] * (close / entry_price if entry_price else 1)
-            elif position == 'short':
-                eq = equity_curve[-1] * (entry_price / close if entry_price else 1)
-            else:
-                eq = equity_curve[-1]
-            equity_curve.append(eq)
-
-        result = {
-            "timeframe": timeframe,
-            "days": days,
-            "candles": len(ohlcv),
-            "trades": len(trades),
-            "total_pnl": round(total_pnl, 2),
-            "final_equity": round(equity_curve[-1], 2),
-            "max_drawdown_pct": round((min(equity_curve) / max(equity_curve) - 1) * 100, 2) if equity_curve else 0,
-            "sample_trades": trades[-10:]
-        }
-
-        logger.info(f"Backtest fertig: {result}")
-        return jsonify(result), 200
-
-    except Exception as e:
-        logger.error(f"Backtest Fehler: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-
-
-  
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
