@@ -1,4 +1,4 @@
-# bot.py – Komplett neu geschrieben für deine exakte Logik
+# bot.py – Komplett neu, sauber und auf deine exakte Logik zugeschnitten (Feb 2026)
 import os
 import logging
 from flask import Flask, request, jsonify
@@ -9,39 +9,36 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Logging – wichtig für Render-Logs
+# Logging für Render-Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Bitget Exchange Konfiguration
+# Bitget Konfiguration – USDT Perpetual Futures
 exchange = ccxt.bitget({
     'apiKey': os.getenv('BITGET_API_KEY'),
     'secret': os.getenv('BITGET_SECRET'),
     'password': os.getenv('BITGET_PASSPHRASE'),
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'},  # USDT-Perpetual
+    'options': {'defaultType': 'swap'},
 })
 
 SYMBOL = 'BTC/USDT:USDT'
 LEVERAGE = 5
-TARGET_MARGIN_PCT = 0.33           # 33 % des verfügbaren USDT
-MIN_AMOUNT_BTC = 0.001             # Bitget Minimum für BTC/USDT:USDT
+TARGET_MARGIN_PCT = 0.33          # 33 % des verfügbaren USDT
+MIN_AMOUNT_BTC = 0.001            # Bitget Minimum
 
 def setup_exchange():
-    """Einmalig Leverage + Isolated setzen"""
     try:
         exchange.set_leverage(LEVERAGE, SYMBOL)
-        logger.info(f"Leverage auf {LEVERAGE}x gesetzt")
-        
+        logger.info(f"Leverage {LEVERAGE}x gesetzt für {SYMBOL}")
         exchange.set_margin_mode('isolated', SYMBOL)
-        logger.info("Margin Mode → isolated")
+        logger.info(f"Isolated Margin gesetzt für {SYMBOL}")
     except Exception as e:
         logger.error(f"Setup Fehler: {e}")
 
 setup_exchange()
 
 def get_usdt_balance():
-    """Verfügbarer USDT in Futures holen"""
     try:
         bal = exchange.fetch_balance(params={'type': 'swap'})
         return float(bal.get('USDT', {}).get('free', 0))
@@ -49,8 +46,23 @@ def get_usdt_balance():
         logger.error(f"Balance Fehler: {e}")
         return 0
 
+def calculate_size():
+    usdt = get_usdt_balance()
+    if usdt <= 0:
+        logger.warning("Kein USDT frei → Größe 0")
+        return 0.0
+    target = usdt * TARGET_MARGIN_PCT
+    try:
+        price = float(exchange.fetch_ticker(SYMBOL)['last'])
+        size = target / price
+        size = max(MIN_AMOUNT_BTC, round(size, 3))
+        logger.info(f"Größe: {size:.3f} BTC (~{size*price:,.0f} USDT)")
+        return size
+    except Exception as e:
+        logger.error(f"Größe-Fehler: {e}")
+        return 0.0
+
 def get_position():
-    """Aktuelle Position: (side: 'long'/'short'/None, amount: float)"""
     try:
         pos = exchange.fetch_positions([SYMBOL])
         for p in pos:
@@ -59,33 +71,14 @@ def get_position():
                 return p['side'], amt
         return None, 0.0
     except Exception as e:
-        logger.error(f"Position abfragen Fehler: {e}")
+        logger.error(f"Position-Fehler: {e}")
         return None, 0.0
-
-def calculate_size():
-    """Berechne Positionsgröße in BTC (~33 % Balance)"""
-    usdt_free = get_usdt_balance()
-    if usdt_free <= 0:
-        logger.warning("Kein freier USDT → Größe = 0")
-        return 0.0
-
-    target_usdt = usdt_free * TARGET_MARGIN_PCT
-    
-    try:
-        price = float(exchange.fetch_ticker(SYMBOL)['last'])
-        size_btc = target_usdt / price
-        size_btc = max(MIN_AMOUNT_BTC, round(size_btc, 3))
-        logger.info(f"Berechnete Größe: {size_btc:.3f} BTC (~{size_btc*price:,.0f} USDT)")
-        return size_btc
-    except Exception as e:
-        logger.error(f"Größe berechnen Fehler: {e}")
-        return 0.0
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         signal = request.data.decode('utf-8').strip()
-        logger.info(f"Signal empfangen → {signal}")
+        logger.info(f"Signal empfangen: '{signal}'")
 
         side, current_size = get_position()
         new_size = calculate_size()
@@ -93,60 +86,41 @@ def webhook():
             logger.warning("Keine gültige Größe → Abbruch")
             return jsonify({"status": "no_size"}), 200
 
-        is_strong = "AI" in signal
-        is_bullish = "Bullish" in signal
-        is_bearish = "Bearish" in signal
+        signal_clean = signal.strip().lower()
 
-        if not (is_bullish or is_bearish):
-            logger.warning("Unbekanntes Signal → ignoriert")
-            return jsonify({"status": "unknown"}), 200
-
-        # ────────────────────────────────────────────────
-        # Bullish Signale (AI oder Mild)
-        # ────────────────────────────────────────────────
-        if is_bullish:
+        # AI Bullish Reversal → Long öffnen / Reversal
+        if "ai bullish reversal" in signal_clean:
+            logger.info("AI Bullish Reversal → Long öffnen / Reversal")
             if side == 'short':
-                # Short schließen + Long öffnen (Reversal bei AI, nur close bei Mild)
-                logger.info("Short schließen")
-                exchange.create_market_buy_order(SYMBOL, current_size)  # buy = short schließen
-                if is_strong:
-                    logger.info("AI Bullish → Long öffnen")
-                    exchange.create_market_buy_order(SYMBOL, new_size)
-            elif side is None and is_strong:
-                # Flat + AI Bullish → Long öffnen
-                logger.info("AI Bullish → Long öffnen")
+                logger.info("Short schließen (reduceOnly)")
+                exchange.create_market_buy_order(SYMBOL, current_size, params={'reduceOnly': True})
+            if side != 'long':
+                logger.info("Long öffnen")
                 exchange.create_market_buy_order(SYMBOL, new_size)
-            else:
-                logger.info("Bereits Long oder Mild ohne Action → skip")
 
-        # ────────────────────────────────────────────────
-        # Bearish Signale (AI oder Mild)
-        # ────────────────────────────────────────────────
-        elif is_bearish:
+        # AI Bearish Reversal → Short öffnen / Reversal
+        elif "ai bearish reversal" in signal_clean:
+            logger.info("AI Bearish Reversal → Short öffnen / Reversal")
             if side == 'long':
-                # Long schließen + Short öffnen (Reversal bei AI, nur close bei Mild)
-                logger.info("Long schließen")
-                exchange.create_market_sell_order(SYMBOL, current_size)  # sell = long schließen
-                if is_strong:
-                    logger.info("AI Bearish → Short öffnen")
-                    exchange.create_market_sell_order(SYMBOL, new_size)
-            elif side is None and is_strong:
-                # Flat + AI Bearish → Short öffnen
-                logger.info("AI Bearish → Short öffnen")
+                logger.info("Long schließen (reduceOnly)")
+                exchange.create_market_sell_order(SYMBOL, current_size, params={'reduceOnly': True})
+            if side != 'short':
+                logger.info("Short öffnen")
                 exchange.create_market_sell_order(SYMBOL, new_size)
-            else:
-                logger.info("Bereits Short oder Mild ohne Action → skip")
 
-        return jsonify({"status": "ok"}), 200
+        # Mild Bullish Reversal → nur Short schließen (wenn offen)
+        elif "mild bullish reversal" in signal_clean:
+            logger.info("Mild Bullish Reversal → nur Exit wenn Short")
+            if side == 'short':
+                logger.info("Short schließen (reduceOnly)")
+                exchange.create_market_buy_order(SYMBOL, current_size, params={'reduceOnly': True})
 
-    except Exception as e:
-        logger.error(f"Webhook Fehler: {str(e)}")
-        return jsonify({"status": "error", "msg": str(e)}), 500
+        # Mild Bearish Reversal → nur Long schließen (wenn offen)
+        elif "mild bearish reversal" in signal_clean:
+            logger.info("Mild Bearish Reversal → nur Exit wenn Long")
+            if side == 'long':
+                logger.info("Long schließen (reduceOnly)")
+                exchange.create_market_sell_order(SYMBOL, current_size, params={'reduceOnly': True})
 
-@app.route('/health', methods=['GET'])
-def health():
-    return "OK", 200
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+        else:
+            logger.warning(f"Unbekanntes Signal: '{signal}'")
