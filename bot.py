@@ -1,8 +1,9 @@
+# bot.py – Feste Margin 5 USDT, Leverage 5x pro Order, Isolated pro Order, mit Stop-Loss 0.25%
 import os
 import logging
 from flask import Flask, request, jsonify
 import ccxt
-import math  # Neu: Für floor
+import math  # Für floor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,10 +22,11 @@ exchange = ccxt.bitget({
 })
 
 SYMBOL = 'BTC/USDT:USDT'
-FIXED_MARGIN_USDT = 5.0
+FIXED_MARGIN_USDT = 5.0          # Ändere hier für höhere Margin (z.B. 20)
 LEVERAGE = 5
+STOP_LOSS_PCT = 0.0025           # 0.25% Stop-Loss
 
-# Neu: Markets laden für Precision
+# Markets laden für Precision
 exchange.load_markets()
 market = exchange.market(SYMBOL)
 min_size = market['limits']['amount']['min']  # 0.0001 BTC
@@ -64,7 +66,7 @@ def calculate_size():
             return 0.0
 
         size_btc = notional_usdt / price
-        # Neu: Runde auf nächstes niedrigeres Vielfaches der Step Size
+        # Runde auf nächstes niedrigeres Vielfaches der Step Size
         size_btc = math.floor(size_btc / step_size) * step_size
         if size_btc < min_size:
             logger.warning(f"Gerundete Size {size_btc:.6f} < Min-Size {min_size} BTC → Zu klein")
@@ -99,7 +101,7 @@ def webhook():
         if new_size <= 0:
             return jsonify({"status": "no_size"}), 200
 
-        # Neu: Size als String für Bitget-Precision
+        # Size als String für Bitget-Precision
         new_size_str = str(new_size)
         current_size_str = str(current_size) if current_size > 0 else '0'
 
@@ -111,8 +113,17 @@ def webhook():
                 logger.info("Short schließen")
                 exchange.create_market_buy_order(SYMBOL, current_size_str, params={'reduceOnly': True})
             if side != 'long':
-                logger.info("Long öffnen")
-                exchange.create_market_buy_order(SYMBOL, new_size_str)
+                logger.info("Long öffnen mit SL")
+                price = float(exchange.fetch_ticker(SYMBOL)['last'])  # aktueller Preis ≈ Entry
+                sl_price = price * (1 - STOP_LOSS_PCT)
+                sl_price_str = "{:.2f}".format(sl_price)  # 2 Dezimalen für Preis
+                
+                params = {
+                    'marginMode': 'isolated',
+                    'presetStopLossPrice': sl_price_str,
+                }
+                order = exchange.create_market_buy_order(SYMBOL, new_size_str, params=params)
+                logger.info(f"Long geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str}")
 
         elif "ai bearish reversal" in signal_clean:
             logger.info("AI Bearish Reversal → Short / Reversal")
@@ -120,8 +131,17 @@ def webhook():
                 logger.info("Long schließen")
                 exchange.create_market_sell_order(SYMBOL, current_size_str, params={'reduceOnly': True})
             if side != 'short':
-                logger.info("Short öffnen")
-                exchange.create_market_sell_order(SYMBOL, new_size_str)
+                logger.info("Short öffnen mit SL")
+                price = float(exchange.fetch_ticker(SYMBOL)['last'])
+                sl_price = price * (1 + STOP_LOSS_PCT)
+                sl_price_str = "{:.2f}".format(sl_price)
+                
+                params = {
+                    'marginMode': 'isolated',
+                    'presetStopLossPrice': sl_price_str,
+                }
+                order = exchange.create_market_sell_order(SYMBOL, new_size_str, params=params)
+                logger.info(f"Short geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str}")
 
         elif "mild bullish reversal" in signal_clean:
             logger.info("Mild Bullish → nur Short close")
