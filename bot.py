@@ -1,9 +1,9 @@
-# bot.py – Feste Margin 5 USDT, Leverage 5x pro Order, Isolated pro Order, mit Stop-Loss 0.25%
+# bot.py – Feste Margin 5 USDT, Leverage 5x pro Order, Isolated pro Order, mit Stop-Loss 0.25% (gerundet auf Tick Size)
 import os
 import logging
 from flask import Flask, request, jsonify
 import ccxt
-import math  # Für floor
+import math  # Für floor und ceil
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +25,7 @@ SYMBOL = 'BTC/USDT:USDT'
 FIXED_MARGIN_USDT = 5.0          # Ändere hier für höhere Margin (z.B. 20)
 LEVERAGE = 5
 STOP_LOSS_PCT = 0.0025           # 0.25% Stop-Loss
+TICK_SIZE = 0.1                  # Tick Size für BTC/USDT Perpetual (fix 0.1 USDT)
 
 # Markets laden für Precision
 exchange.load_markets()
@@ -115,15 +116,17 @@ def webhook():
             if side != 'long':
                 logger.info("Long öffnen mit SL")
                 price = float(exchange.fetch_ticker(SYMBOL)['last'])  # aktueller Preis ≈ Entry
-                sl_price = price * (1 - STOP_LOSS_PCT)
-                sl_price_str = "{:.2f}".format(sl_price)  # 2 Dezimalen für Preis
+                sl_price_raw = price * (1 - STOP_LOSS_PCT)
+                # Runden auf nächsten niedrigeren Tick (floor) für Long SL
+                sl_price = math.floor(sl_price_raw / TICK_SIZE) * TICK_SIZE
+                sl_price_str = "{:.1f}".format(sl_price)  # Immer .0 oder .1 etc., 1 Dezimale
                 
                 params = {
                     'marginMode': 'isolated',
                     'presetStopLossPrice': sl_price_str,
                 }
                 order = exchange.create_market_buy_order(SYMBOL, new_size_str, params=params)
-                logger.info(f"Long geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str}")
+                logger.info(f"Long geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str} (gerundet von {sl_price_raw:.2f})")
 
         elif "ai bearish reversal" in signal_clean:
             logger.info("AI Bearish Reversal → Short / Reversal")
@@ -133,15 +136,17 @@ def webhook():
             if side != 'short':
                 logger.info("Short öffnen mit SL")
                 price = float(exchange.fetch_ticker(SYMBOL)['last'])
-                sl_price = price * (1 + STOP_LOSS_PCT)
-                sl_price_str = "{:.2f}".format(sl_price)
+                sl_price_raw = price * (1 + STOP_LOSS_PCT)
+                # Runden auf nächsten höheren Tick (ceil) für Short SL – konservativer
+                sl_price = math.ceil(sl_price_raw / TICK_SIZE) * TICK_SIZE
+                sl_price_str = "{:.1f}".format(sl_price)
                 
                 params = {
                     'marginMode': 'isolated',
                     'presetStopLossPrice': sl_price_str,
                 }
                 order = exchange.create_market_sell_order(SYMBOL, new_size_str, params=params)
-                logger.info(f"Short geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str}")
+                logger.info(f"Short geöffnet | Entry ~{price:.2f} | SL bei {sl_price_str} (gerundet von {sl_price_raw:.2f})")
 
         elif "mild bullish reversal" in signal_clean:
             logger.info("Mild Bullish → nur Short close")
